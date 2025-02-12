@@ -72,6 +72,9 @@ def start_oauth():
     )
     return redirect(amazon_auth_url)
 
+
+
+
 @app.route('/callback')
 def callback():
     """Handles the OAuth callback and stores credentials in PostgreSQL."""
@@ -80,6 +83,11 @@ def callback():
 
     if not auth_code or not selling_partner_id:
         return jsonify({"error": "Missing parameters"}), 400
+
+    # Debugging Logs
+    print("🚀 Received auth_code:", auth_code)
+    print("🔍 Received selling_partner_id:", selling_partner_id)
+    print("🔑 Sending OAuth Token Exchange Request...")
 
     # Exchange Authorization Code for Tokens
     payload = {
@@ -90,13 +98,20 @@ def callback():
         "client_secret": LWA_CLIENT_SECRET,
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    # Debugging: Print payload before sending the request
+    print("🔍 OAuth Request Payload:", payload)
+
     response = requests.post(TOKEN_URL, data=payload, headers=headers)
     token_data = response.json()
+
+    # Debugging: Print Amazon's response
+    print("🔍 OAuth Response:", token_data)
 
     if "access_token" not in token_data:
         return jsonify({"error": "Failed to exchange token", "details": token_data}), 400
 
-    # Store in PostgreSQL
+    # Store in database
     save_oauth_tokens(
         selling_partner_id,
         token_data["access_token"],
@@ -104,8 +119,13 @@ def callback():
         token_data["expires_in"]
     )
 
-    # ✅ Redirect with selling_partner_id
-    return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard?selling_partner_id={selling_partner_id}")
+    # Store in session
+    session["access_token"] = token_data["access_token"]
+    session["refresh_token"] = token_data["refresh_token"]
+    session["selling_partner_id"] = selling_partner_id
+
+    return redirect("https://guillermos-amazing-site-b0c75a.webflow.io/dashboard")
+
 
 
 @app.route("/dashboard")
