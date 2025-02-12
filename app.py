@@ -5,8 +5,7 @@ import os
 from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_session import Session
-
-
+import requests
 
 # Initialize Flask App
 app = Flask(__name__)
