@@ -182,7 +182,7 @@ def get_orders():
     marketplace_id = "A1AM78C64UM0Y8"
 
     # Calculate the date 30 days ago
-    created_after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
+    created_after = (datetime.utcnow() - timedelta(days=200)).isoformat() + "Z"
 
     # Construct the API request URL with CreatedAfter filter
     amazon_orders_url = (
