@@ -77,7 +77,15 @@ def callback():
     selling_partner_id = request.args.get("selling_partner_id")
 
     if not auth_code or not selling_partner_id:
+        print("❌ ERROR: Missing auth_code or selling_partner_id")
         return jsonify({"error": "Missing parameters"}), 400
+
+    print("🚀 Received auth_code:", auth_code)
+    print("🔍 Received selling_partner_id:", selling_partner_id)
+
+    if not LWA_APP_ID or not LWA_CLIENT_SECRET or not REDIRECT_URI:
+        print("❌ ERROR: Missing OAuth credentials from .env")
+        return jsonify({"error": "OAuth credentials missing"}), 500
 
     payload = {
         "grant_type": "authorization_code",
@@ -86,14 +94,24 @@ def callback():
         "client_id": LWA_APP_ID,
         "client_secret": LWA_CLIENT_SECRET,
     }
+
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
+    print("🛠️ Sending OAuth Token Exchange Request...")
     response = requests.post(TOKEN_URL, data=payload, headers=headers)
-    token_data = response.json()
+
+    try:
+        token_data = response.json()
+    except Exception as e:
+        print("❌ ERROR: Could not parse JSON response", e)
+        return jsonify({"error": "Invalid response from Amazon", "details": str(e)}), 500
+
+    print("🔍 OAuth Response:", token_data)
 
     if "access_token" not in token_data:
         return jsonify({"error": "Failed to exchange token", "details": token_data}), 400
 
+    # Save tokens in DB
     save_oauth_tokens(
         selling_partner_id,
         token_data["access_token"],
@@ -101,11 +119,18 @@ def callback():
         token_data["expires_in"]
     )
 
+    # Store tokens in session for Webflow dashboard
     session["access_token"] = token_data["access_token"]
     session["refresh_token"] = token_data["refresh_token"]
     session["selling_partner_id"] = selling_partner_id
 
-    return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard?selling_partner_id={selling_partner_id}")
+    # Redirect to Webflow dashboard with tokens
+    return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard"
+                    f"?selling_partner_id={selling_partner_id}"
+                    f"&access_token={token_data['access_token']}"
+                    f"&refresh_token={token_data['refresh_token']}"
+                    f"&expires_in={token_data['expires_in']}")
+
 
 
 @app.route('/get-amazon-tokens', methods=["GET"])
