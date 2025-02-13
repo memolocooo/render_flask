@@ -142,6 +142,46 @@ def get_amazon_tokens():
         return jsonify({"error": "Database connection failed", "details": str(e)}), 500
 
 
+@app.route('/get-orders', methods=['GET'])
+def get_orders():
+    """Fetch orders from Amazon SP-API."""
+    selling_partner_id = request.args.get("selling_partner_id")
+    access_token = request.args.get("access_token")
+
+    if not selling_partner_id or not access_token:
+        return jsonify({"error": "Missing selling_partner_id or access_token"}), 400
+
+    amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders"
+    headers = {
+        "x-amz-access-token": access_token,
+        "Content-Type": "application/json"
+    }
+
+    print(f"📡 Fetching orders for Selling Partner ID: {selling_partner_id}")
+
+    response = requests.get(amazon_orders_url, headers=headers)
+    orders_data = response.json()
+
+    # Debugging: Print Amazon's response
+    print("📊 Amazon Orders Response:", orders_data)
+
+    if "orders" not in orders_data:
+        return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
+
+    # Extracting order data
+    orders_summary = []
+    for order in orders_data["orders"]:
+        orders_summary.append({
+            "order_id": order.get("AmazonOrderId", "N/A"),
+            "status": order.get("OrderStatus", "N/A"),
+            "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
+            "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
+            "purchase_date": order.get("PurchaseDate", "N/A")
+        })
+
+    return jsonify({"orders": orders_summary})
+
+
 if __name__ == "__main__":
     from os import environ
     app.run(host="0.0.0.0", port=int(environ.get("PORT", 5000)))
