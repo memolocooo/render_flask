@@ -64,13 +64,16 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
 def start_oauth():
     """Redirects user to Amazon OAuth login page."""
     amazon_auth_url = (
-        f"{AUTH_URL}"
-        f"?application_id={LWA_APP_ID}"
-        f"&state=random_state_value"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&version=beta"
-    )
+        f"{AUTH_URL}?"
+        f"application_id={LWA_APP_ID}&"
+        f"state=random_state_value&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"version=beta"
+    ).strip()
+
+    print(f"🔗 OAuth Redirect URL: {amazon_auth_url}")  # Debugging
     return redirect(amazon_auth_url)
+
 
 
 
