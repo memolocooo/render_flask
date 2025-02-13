@@ -1,34 +1,26 @@
-import psycopg2
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, request, redirect, session
 import os
+import requests
+import uuid
+from flask import Flask, jsonify, request, redirect, session
 from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_session import Session
-import requests
-import uuid
-
-# Initialize Flask App
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY")
-CORS(app, supports_credentials=True, origins=["https://guillermos-amazing-site-b0c75a.webflow.io"])
-
-# ✅ Ensure session is properly configured before using `Session(app)`
-app.config["SESSION_TYPE"] = "filesystem"
-app.config["SESSION_PERMANENT"] = False
-app.config["SESSION_FILE_DIR"] = "./flask_session_data"  # Ensure this exists
-
-# ✅ Initialize Flask-Session after setting config
-Session(app)
+import psycopg2
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
 
-# Utility function to generate a unique state
-def generate_state():
-    return str(uuid.uuid4())
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
-print("✅ Connected to PostgreSQL!")
+# Enable CORS for Webflow
+CORS(app, supports_credentials=True, origins=["https://guillermos-amazing-site-b0c75a.webflow.io"])
+
+# Configure Flask Session
+app.config["SESSION_TYPE"] = "filesystem"
+app.config["SESSION_PERMANENT"] = False
+Session(app)
 
 # Amazon OAuth Variables
 LWA_APP_ID = os.getenv("LWA_APP_ID")
@@ -36,17 +28,10 @@ LWA_CLIENT_SECRET = os.getenv("LWA_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 AUTH_URL = os.getenv("AUTH_URL")
 TOKEN_URL = os.getenv("TOKEN_URL")
-SP_API_BASE_URL = os.getenv("SP_API_BASE_URL")  # Amazon SP-API Endpoint
-USE_SANDBOX = os.getenv("USE_SANDBOX", "False").lower() == "true"  # Convert to boolean
+SP_API_BASE_URL = os.getenv("SP_API_BASE_URL")
 
-# Use Render's database URL
+# PostgreSQL Database Connection
 DATABASE_URL = os.getenv("DB_URL")
-
-# Ensure DATABASE_URL is set correctly
-if not DATABASE_URL:
-    raise Exception("❌ DATABASE_URL is missing. Check Render Environment Variables.")
-
-# Connect to PostgreSQL
 DB_CONN = psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
@@ -70,7 +55,7 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
 @app.route('/start-oauth')
 def start_oauth():
     """Redirects user to Amazon OAuth login page."""
-    state = generate_state()
+    state = str(uuid.uuid4())
     session['oauth_state'] = state  # Store state in session
 
     amazon_auth_url = (
@@ -81,25 +66,18 @@ def start_oauth():
         f"version=beta"
     )
 
-    print(f"🔗 OAuth Redirect URL: {amazon_auth_url}")  # Debugging
+    print(f"🔗 OAuth Redirect URL: {amazon_auth_url}")
     return redirect(amazon_auth_url)
 
 
 @app.route('/callback')
 def callback():
-    """Handles the OAuth callback and stores credentials in PostgreSQL."""
+    """Handles OAuth callback and exchanges auth code for tokens."""
     auth_code = request.args.get("spapi_oauth_code")
     selling_partner_id = request.args.get("selling_partner_id")
 
-    if not auth_code:
-        return jsonify({"error": "Missing spapi_oauth_code"}), 400
-
-    if not selling_partner_id:
-        print("❌ ERROR: Missing selling_partner_id in callback")
-        return jsonify({"error": "Missing selling_partner_id"}), 400
-
-    print("🚀 Received auth_code:", auth_code)
-    print("🔍 Received selling_partner_id:", selling_partner_id)
+    if not auth_code or not selling_partner_id:
+        return jsonify({"error": "Missing parameters"}), 400
 
     payload = {
         "grant_type": "authorization_code",
@@ -114,7 +92,6 @@ def callback():
     token_data = response.json()
 
     if "access_token" not in token_data:
-        print("❌ OAuth Token Exchange Failed:", token_data)
         return jsonify({"error": "Failed to exchange token", "details": token_data}), 400
 
     save_oauth_tokens(
@@ -131,17 +108,38 @@ def callback():
     return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard?selling_partner_id={selling_partner_id}")
 
 
-@app.route("/sandbox-test")
-def sandbox_test():
-    """Test Amazon SP-API in Sandbox Mode"""
-    if not USE_SANDBOX:
-        return jsonify({"error": "Sandbox mode is disabled. Enable it in .env"}), 400
+@app.route('/get-amazon-tokens', methods=["GET"])
+def get_amazon_tokens():
+    """Fetch stored OAuth tokens for a selling partner."""
+    selling_partner_id = request.args.get("selling_partner_id")
 
-    url = f"{SP_API_BASE_URL}/sandbox/some-test-endpoint"
-    headers = {"Authorization": f"Bearer {session.get('access_token')}"}
+    if not selling_partner_id:
+        return jsonify({"error": "Missing selling_partner_id"}), 400
 
-    response = requests.get(url, headers=headers)
-    return jsonify(response.json())
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute("""
+                SELECT access_token, refresh_token, expires_at 
+                FROM amazon_oauth_tokens 
+                WHERE selling_partner_id = %s
+            """, (selling_partner_id,))
+            result = cur.fetchone()
+
+        if result:
+            access_token, refresh_token, expires_at = result
+            return jsonify({
+                "message": "Amazon SP-API Tokens Retrieved Successfully!",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "selling_partner_id": selling_partner_id,
+                "expires_at": expires_at.isoformat(),
+                "token_type": "bearer"
+            })
+
+        return jsonify({"error": "User not authenticated"}), 401
+
+    except Exception as e:
+        return jsonify({"error": "Database connection failed", "details": str(e)}), 500
 
 
 if __name__ == "__main__":
