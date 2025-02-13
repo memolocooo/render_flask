@@ -207,25 +207,37 @@ def get_orders():
 
         print("📊 Amazon Orders Response:", orders_data)
 
-        if "orders" not in orders_data:
+        # 🛠 FIX: Ensure response contains 'Orders' before proceeding
+        if "payload" in orders_data and "Orders" in orders_data["payload"]:
+            orders_list = orders_data["payload"]["Orders"]
+
+            # ✅ Check if there are no orders and return a clean response
+            if len(orders_list) == 0:
+                print("⚠️ No orders found in the requested date range.")
+                return jsonify({"message": "No orders found", "orders": []}), 200
+
+            # ✅ Extract order details
+            orders_summary = [
+                {
+                    "order_id": order.get("AmazonOrderId", "N/A"),
+                    "status": order.get("OrderStatus", "N/A"),
+                    "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
+                    "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
+                    "purchase_date": order.get("PurchaseDate", "N/A")
+                }
+                for order in orders_list
+            ]
+
+            return jsonify({"orders": orders_summary})
+
+        else:
+            print("❌ ERROR: Unexpected API response format")
             return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
-
-        orders_summary = [
-            {
-                "order_id": order.get("AmazonOrderId", "N/A"),
-                "status": order.get("OrderStatus", "N/A"),
-                "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
-                "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
-                "purchase_date": order.get("PurchaseDate", "N/A")
-            }
-            for order in orders_data["orders"]
-        ]
-
-        return jsonify({"orders": orders_summary})
 
     except requests.exceptions.RequestException as e:
         print("❌ API Request Error:", e)
         return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
+
 
 
 if __name__ == "__main__":
