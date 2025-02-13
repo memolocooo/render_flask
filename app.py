@@ -30,6 +30,7 @@ AUTH_URL = os.getenv("AUTH_URL")
 TOKEN_URL = os.getenv("TOKEN_URL")
 SP_API_BASE_URL = os.getenv("SP_API_BASE_URL")
 APP_ID = os.getenv("APP_ID")
+
 # PostgreSQL Database Connection
 DATABASE_URL = os.getenv("DB_URL")
 DB_CONN = psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -52,142 +53,93 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
         DB_CONN.commit()
 
 
-@app.route('/start-oauth')
-def start_oauth():
-    """Redirects user to Amazon OAuth login page."""
-    state = str(uuid.uuid4())
-    session['oauth_state'] = state  # Store state in session
-
-    amazon_auth_url = (
-        f"{AUTH_URL}?"
-        f"application_id={APP_ID}&"
-        f"state={state}&"
-        f"redirect_uri={REDIRECT_URI}&"
-        f"version=beta"
-    )
-
-    print(f"🔗 OAuth Redirect URL: {amazon_auth_url}")
-    return redirect(amazon_auth_url)
+def get_stored_tokens(selling_partner_id):
+    """Retrieve stored tokens from database."""
+    with DB_CONN.cursor() as cur:
+        cur.execute("""
+            SELECT access_token, refresh_token, expires_at 
+            FROM amazon_oauth_tokens 
+            WHERE selling_partner_id = %s
+        """, (selling_partner_id,))
+        return cur.fetchone()
 
 
-@app.route('/callback')
-def callback():
-    """Handles OAuth callback and exchanges auth code for tokens."""
-    auth_code = request.args.get("spapi_oauth_code")
-    selling_partner_id = request.args.get("selling_partner_id")
-
-    if not auth_code or not selling_partner_id:
-        print("❌ ERROR: Missing auth_code or selling_partner_id")
-        return jsonify({"error": "Missing parameters"}), 400
-
-    print("🚀 Received auth_code:", auth_code)
-    print("🔍 Received selling_partner_id:", selling_partner_id)
-
-    if not LWA_APP_ID or not LWA_CLIENT_SECRET or not REDIRECT_URI:
-        print("❌ ERROR: Missing OAuth credentials from .env")
-        return jsonify({"error": "OAuth credentials missing"}), 500
-
-    payload = {
-        "grant_type": "authorization_code",
-        "code": auth_code,
-        "redirect_uri": REDIRECT_URI,
-        "client_id": LWA_APP_ID,
-        "client_secret": LWA_CLIENT_SECRET,
-    }
-
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
-    print("🛠️ Sending OAuth Token Exchange Request...")
-    response = requests.post(TOKEN_URL, data=payload, headers=headers)
-
-    try:
-        token_data = response.json()
-    except Exception as e:
-        print("❌ ERROR: Could not parse JSON response", e)
-        return jsonify({"error": "Invalid response from Amazon", "details": str(e)}), 500
-
-    print("🔍 OAuth Response:", token_data)
-
-    if "access_token" not in token_data:
-        return jsonify({"error": "Failed to exchange token", "details": token_data}), 400
-
-    # Save tokens in DB
-    save_oauth_tokens(
-        selling_partner_id,
-        token_data["access_token"],
-        token_data["refresh_token"],
-        token_data["expires_in"]
-    )
-
-    # Store tokens in session for Webflow dashboard
-    session["access_token"] = token_data["access_token"]
-    session["refresh_token"] = token_data["refresh_token"]
-    session["selling_partner_id"] = selling_partner_id
-
-    # Redirect to Webflow dashboard with tokens
-    return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard"
-                    f"?selling_partner_id={selling_partner_id}"
-                    f"&access_token={token_data['access_token']}"
-                    f"&refresh_token={token_data['refresh_token']}"
-                    f"&expires_in={token_data['expires_in']}")
-
-
-
-@app.route('/get-amazon-tokens', methods=["GET"])
-def get_amazon_tokens():
-    """Fetch stored OAuth tokens for a selling partner."""
-    selling_partner_id = request.args.get("selling_partner_id")
-
-    if not selling_partner_id:
-        return jsonify({"error": "Missing selling_partner_id"}), 400
-
-    try:
-        with DB_CONN.cursor() as cur:
-            cur.execute("""
-                SELECT access_token, refresh_token, expires_at 
-                FROM amazon_oauth_tokens 
-                WHERE selling_partner_id = %s
-            """, (selling_partner_id,))
-            result = cur.fetchone()
-
-        if result:
-            access_token, refresh_token, expires_at = result
-            return jsonify({
-                "message": "Amazon SP-API Tokens Retrieved Successfully!",
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "selling_partner_id": selling_partner_id,
-                "expires_at": expires_at.isoformat(),
-                "token_type": "bearer"
-            })
-
-        return jsonify({"error": "User not authenticated"}), 401
-
-    except Exception as e:
-        return jsonify({"error": "Database connection failed", "details": str(e)}), 500
-
-
-def refresh_access_token(refresh_token):
+def refresh_access_token(selling_partner_id, refresh_token):
     """Refresh Amazon SP-API access token using the refresh token."""
     print("🔄 Refreshing expired access token...")
 
-    token_url = "https://api.amazon.com/auth/o2/token"
     payload = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "client_id": os.getenv("LWA_APP_ID"),
-        "client_secret": os.getenv("LWA_CLIENT_SECRET")
+        "client_id": LWA_APP_ID,
+        "client_secret": LWA_CLIENT_SECRET
     }
 
-    response = requests.post(token_url, data=payload)
+    response = requests.post(TOKEN_URL, data=payload)
     token_data = response.json()
 
     if "access_token" in token_data:
         print("✅ Access token refreshed successfully!")
+        save_oauth_tokens(selling_partner_id, token_data["access_token"], refresh_token, token_data["expires_in"])
         return token_data["access_token"]
-    else:
-        print("❌ Failed to refresh access token:", token_data)
-        return None
+    
+    print("❌ Failed to refresh access token:", token_data)
+    return None
+
+
+@app.route('/start-oauth')
+def start_oauth():
+    """Redirects user to Amazon for OAuth authentication."""
+    state = str(uuid.uuid4())
+    session["oauth_state"] = state
+
+    oauth_url = (
+        f"{AUTH_URL}/apps/authorize/consent"
+        f"?application_id={APP_ID}"
+        f"&state={state}"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&version=beta"
+    )
+
+    print(f"🔗 OAuth Redirect URL: {oauth_url}")
+    return redirect(oauth_url)
+
+
+@app.route('/callback')
+def callback():
+    """Handles Amazon OAuth callback and stores access tokens."""
+    auth_code = request.args.get("spapi_oauth_code")
+    selling_partner_id = request.args.get("selling_partner_id")
+
+    if not auth_code or not selling_partner_id:
+        return jsonify({"error": "Missing auth_code or selling_partner_id"}), 400
+
+    print(f"🚀 Received auth_code: {auth_code}")
+    print(f"🔍 Received selling_partner_id: {selling_partner_id}")
+
+    # Exchange auth code for access & refresh tokens
+    token_payload = {
+        "grant_type": "authorization_code",
+        "code": auth_code,
+        "client_id": LWA_APP_ID,
+        "client_secret": LWA_CLIENT_SECRET
+    }
+
+    token_response = requests.post(TOKEN_URL, data=token_payload)
+    token_data = token_response.json()
+
+    if "access_token" in token_data and "refresh_token" in token_data:
+        save_oauth_tokens(
+            selling_partner_id,
+            token_data["access_token"],
+            token_data["refresh_token"],
+            token_data["expires_in"]
+        )
+
+        return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard")
+
+    return jsonify({"error": "Failed to obtain tokens", "details": token_data}), 400
+
 
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
@@ -196,9 +148,23 @@ def get_orders():
     access_token = request.args.get("access_token")
     refresh_token = request.args.get("refresh_token")
 
-    if not selling_partner_id or not access_token or not refresh_token:
-        print("❌ ERROR: Missing credentials")
-        return jsonify({"error": "Missing selling_partner_id, access_token, or refresh_token"}), 400
+    if not selling_partner_id:
+        return jsonify({"error": "Missing selling_partner_id"}), 400
+
+    stored_tokens = get_stored_tokens(selling_partner_id)
+    if stored_tokens:
+        stored_access_token, stored_refresh_token, expires_at = stored_tokens
+        if not access_token:
+            access_token = stored_access_token
+        if not refresh_token:
+            refresh_token = stored_refresh_token
+
+        if expires_at and datetime.utcnow() >= expires_at:
+            print("🔄 Token expired, refreshing...")
+            access_token = refresh_access_token(selling_partner_id, refresh_token)
+
+    if not access_token or not refresh_token:
+        return jsonify({"error": "Missing authentication credentials"}), 400
 
     marketplace_id = "A1AM78C64UM0Y8"
     created_after = (datetime.utcnow() - timedelta(days=200)).isoformat() + "Z"
@@ -214,18 +180,13 @@ def get_orders():
         "Content-Type": "application/json"
     }
 
-    print(f"📡 Fetching orders for Selling Partner ID: {selling_partner_id}")
-    print(f"🔗 Amazon API URL: {amazon_orders_url}")
-    print(f"📅 Created After: {created_after}")
-
     try:
         response = requests.get(amazon_orders_url, headers=headers)
         orders_data = response.json()
 
-        # If token expired, refresh and retry
         if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
             print("🔄 Access token expired, attempting refresh...")
-            new_access_token = refresh_access_token(refresh_token)
+            new_access_token = refresh_access_token(selling_partner_id, refresh_token)
 
             if new_access_token:
                 headers["x-amz-access-token"] = new_access_token
@@ -234,12 +195,10 @@ def get_orders():
             else:
                 return jsonify({"error": "Failed to refresh access token"}), 401
 
-        # 🛠 FIX: Ensure response contains 'Orders' before proceeding
         if "payload" in orders_data and "Orders" in orders_data["payload"]:
             orders_list = orders_data["payload"]["Orders"]
 
             if len(orders_list) == 0:
-                print("⚠️ No orders found in the requested date range.")
                 return jsonify({"message": "No orders found", "orders": []}), 200
 
             orders_summary = [
@@ -256,12 +215,11 @@ def get_orders():
             return jsonify({"orders": orders_summary})
 
         else:
-            print("❌ ERROR: Unexpected API response format")
             return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
 
     except requests.exceptions.RequestException as e:
-        print("❌ API Request Error:", e)
         return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
+
 
 if __name__ == "__main__":
     from os import environ
