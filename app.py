@@ -167,9 +167,10 @@ def get_amazon_tokens():
         return jsonify({"error": "Database connection failed", "details": str(e)}), 500
 
 
+
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
-    """Fetch orders from Amazon SP-API."""
+    """Fetch orders from Amazon SP-API for the last 30 days."""
     selling_partner_id = request.args.get("selling_partner_id")
     access_token = request.args.get("access_token")
 
@@ -177,10 +178,19 @@ def get_orders():
         print("❌ ERROR: Missing selling_partner_id or access_token")
         return jsonify({"error": "Missing selling_partner_id or access_token"}), 400
 
-    # Define Amazon Marketplace ID (Use the correct ID for your region)
-    marketplace_id = "A1AM78C64UM0Y8"  # Mexico Marketplace ID (Adjust if needed)
-    
-    amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders?MarketplaceIds={marketplace_id}"
+    # Define Amazon Marketplace ID (Mexico: A1AM78C64UM0Y8, Change if needed)
+    marketplace_id = "A1AM78C64UM0Y8"
+
+    # Calculate the date 30 days ago
+    created_after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
+
+    # Construct the API request URL with CreatedAfter filter
+    amazon_orders_url = (
+        f"{SP_API_BASE_URL}/orders/v0/orders"
+        f"?MarketplaceIds={marketplace_id}"
+        f"&CreatedAfter={created_after}"
+    )
+
     headers = {
         "x-amz-access-token": access_token,
         "Content-Type": "application/json"
@@ -189,6 +199,7 @@ def get_orders():
     print(f"📡 Fetching orders for Selling Partner ID: {selling_partner_id}")
     print(f"🔗 Amazon API URL: {amazon_orders_url}")
     print(f"🔑 Access Token (masked): {access_token[:10]}...")
+    print(f"📅 Created After: {created_after}")
 
     try:
         response = requests.get(amazon_orders_url, headers=headers)
