@@ -42,36 +42,58 @@ if not DATABASE_URL:
     raise Exception("❌ DATABASE_URL is missing. Check Render Environment Variables.")
 
 # Connect to PostgreSQL
-DB_CONN = psycopg2.connect(DATABASE_URL, sslmode="require")
+def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_in):
+    """Save Amazon OAuth credentials to PostgreSQL."""
+    expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO amazon_oauth_tokens (selling_partner_id, access_token, refresh_token, expires_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (selling_partner_id) DO UPDATE 
+                SET access_token = EXCLUDED.access_token,
+                    refresh_token = EXCLUDED.refresh_token,
+                    expires_at = EXCLUDED.expires_at;
+            """, (selling_partner_id, access_token, refresh_token, expires_at))
+
+            conn.commit()
 
 
 def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_in):
     """Save Amazon OAuth credentials to PostgreSQL."""
     expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
 
-    with DB_CONN.cursor() as cur:
-        cur.execute("""
-            INSERT INTO amazon_oauth_tokens (selling_partner_id, access_token, refresh_token, expires_at)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (selling_partner_id) DO UPDATE 
-            SET access_token = EXCLUDED.access_token,
-                refresh_token = EXCLUDED.refresh_token,
-                expires_at = EXCLUDED.expires_at;
-        """, (selling_partner_id, access_token, refresh_token, expires_at))
+    # Create a new DB connection inside function
+    with psycopg2.connect(DATABASE_URL, sslmode="require") as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO amazon_oauth_tokens (selling_partner_id, access_token, refresh_token, expires_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (selling_partner_id) DO UPDATE 
+                SET access_token = EXCLUDED.access_token,
+                    refresh_token = EXCLUDED.refresh_token,
+                    expires_at = EXCLUDED.expires_at;
+            """, (selling_partner_id, access_token, refresh_token, expires_at))
 
-        DB_CONN.commit()
+            conn.commit()
+
 
 @app.route('/start-oauth')
 def start_oauth():
     """Redirects user to Amazon OAuth login page."""
     amazon_auth_url = (
-        f"{AUTH_URL}"
-        f"?application_id={LWA_APP_ID}"
-        f"&state=random_state_value"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&version=beta"
-    )
+        f"{AUTH_URL}?"
+        f"application_id={LWA_APP_ID}&"
+        f"state=random_state_value&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"version=beta"
+    ).strip()  # Ensures no leading/trailing spaces
+
+    print(f"🔗 OAuth Redirect URL: {repr(amazon_auth_url)}")  # Debugging
     return redirect(amazon_auth_url)
+
+
 
 
 
@@ -99,6 +121,9 @@ def callback():
         "client_secret": LWA_CLIENT_SECRET,
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    session.permanent = True
+
 
     # Debugging: Print payload before sending the request
     print("🔍 OAuth Request Payload:", payload)
@@ -134,35 +159,36 @@ def dashboard():
     """Fetch stored OAuth tokens from PostgreSQL instead of Flask session."""
     selling_partner_id = request.args.get("selling_partner_id")
 
-    if not selling_partner_id:
-        return jsonify({"error": "Missing selling_partner_id"}), 400
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if selling_partner_id:
+                cur.execute("""
+                    SELECT access_token, refresh_token, expires_at 
+                    FROM amazon_oauth_tokens 
+                    WHERE selling_partner_id = %s
+                """, (selling_partner_id,))
+            else:
+                cur.execute("""
+                    SELECT selling_partner_id, access_token, refresh_token, expires_at 
+                    FROM amazon_oauth_tokens 
+                    ORDER BY expires_at DESC LIMIT 1
+                """)
 
-    try:
-        with DB_CONN.cursor() as cur:
-            cur.execute("""
-                SELECT access_token, refresh_token, expires_at 
-                FROM amazon_oauth_tokens 
-                WHERE selling_partner_id = %s
-            """, (selling_partner_id,))
             result = cur.fetchone()
 
-        if result:
-            access_token, refresh_token, expires_at = result
-            return jsonify({
-                "message": "Amazon SP-API Connected Successfully!",
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "selling_partner_id": selling_partner_id,
-                "expires_at": expires_at.isoformat(),
-                "token_type": "bearer"
-            })
+    if result:
+        access_token, refresh_token, expires_at = result
+        return jsonify({
+            "message": "Amazon SP-API Connected Successfully!",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "selling_partner_id": selling_partner_id,
+            "expires_at": expires_at.isoformat(),
+            "token_type": "bearer"
+        })
 
-        print("❌ Error: No tokens found for Selling Partner ID:", selling_partner_id)
-        return jsonify({"error": "User not authenticated"}), 401
+    return jsonify({"error": "User not authenticated"}), 401
 
-    except Exception as e:
-        print("❌ Database Error:", e)
-        return jsonify({"error": "Database connection failed", "details": str(e)}), 500
 
 
 
