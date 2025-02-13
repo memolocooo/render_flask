@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_session import Session
 import requests
-
+import uuid
 # Initialize Flask App
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
@@ -24,6 +24,9 @@ Session(app)
 # Load environment variables
 load_dotenv()
 
+# Utility function to generate a unique state
+def generate_state():
+    return str(uuid.uuid4())
 
 print("✅ Connected to PostgreSQL!")
 
@@ -62,11 +65,14 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
 
 @app.route('/start-oauth')
 def start_oauth():
+        # Generate a unique state value
+    state = generate_state()
+    session['oauth_state'] = state  # Store state in session
     """Redirects user to Amazon OAuth login page."""
     amazon_auth_url = (
         f"{AUTH_URL}?"
         f"application_id={LWA_APP_ID}&"
-        f"state=random_state_value&"
+        f"&state={state}" 
         f"redirect_uri={REDIRECT_URI}&"
         f"version=beta"
     ).strip()
