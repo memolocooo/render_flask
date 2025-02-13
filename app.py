@@ -29,7 +29,7 @@ REDIRECT_URI = os.getenv("REDIRECT_URI")
 AUTH_URL = os.getenv("AUTH_URL")
 TOKEN_URL = os.getenv("TOKEN_URL")
 SP_API_BASE_URL = os.getenv("SP_API_BASE_URL")
-
+APP_ID = os.getenv("APP_ID")
 # PostgreSQL Database Connection
 DATABASE_URL = os.getenv("DB_URL")
 DB_CONN = psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -60,7 +60,7 @@ def start_oauth():
 
     amazon_auth_url = (
         f"{AUTH_URL}?"
-        f"application_id={LWA_APP_ID}&"
+        f"application_id={APP_ID}&"
         f"state={state}&"
         f"redirect_uri={REDIRECT_URI}&"
         f"version=beta"
