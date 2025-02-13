@@ -167,24 +167,42 @@ def get_amazon_tokens():
         return jsonify({"error": "Database connection failed", "details": str(e)}), 500
 
 
+def refresh_access_token(refresh_token):
+    """Refresh Amazon SP-API access token using the refresh token."""
+    print("🔄 Refreshing expired access token...")
+
+    token_url = "https://api.amazon.com/auth/o2/token"
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": os.getenv("LWA_APP_ID"),
+        "client_secret": os.getenv("LWA_CLIENT_SECRET")
+    }
+
+    response = requests.post(token_url, data=payload)
+    token_data = response.json()
+
+    if "access_token" in token_data:
+        print("✅ Access token refreshed successfully!")
+        return token_data["access_token"]
+    else:
+        print("❌ Failed to refresh access token:", token_data)
+        return None
 
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
-    """Fetch orders from Amazon SP-API for the last 30 days."""
+    """Fetch orders from Amazon SP-API for the last 200 days."""
     selling_partner_id = request.args.get("selling_partner_id")
     access_token = request.args.get("access_token")
+    refresh_token = request.args.get("refresh_token")
 
-    if not selling_partner_id or not access_token:
-        print("❌ ERROR: Missing selling_partner_id or access_token")
-        return jsonify({"error": "Missing selling_partner_id or access_token"}), 400
+    if not selling_partner_id or not access_token or not refresh_token:
+        print("❌ ERROR: Missing credentials")
+        return jsonify({"error": "Missing selling_partner_id, access_token, or refresh_token"}), 400
 
-    # Define Amazon Marketplace ID (Mexico: A1AM78C64UM0Y8, Change if needed)
     marketplace_id = "A1AM78C64UM0Y8"
-
-    # Calculate the date 30 days ago
     created_after = (datetime.utcnow() - timedelta(days=200)).isoformat() + "Z"
 
-    # Construct the API request URL with CreatedAfter filter
     amazon_orders_url = (
         f"{SP_API_BASE_URL}/orders/v0/orders"
         f"?MarketplaceIds={marketplace_id}"
@@ -198,25 +216,32 @@ def get_orders():
 
     print(f"📡 Fetching orders for Selling Partner ID: {selling_partner_id}")
     print(f"🔗 Amazon API URL: {amazon_orders_url}")
-    print(f"🔑 Access Token (masked): {access_token[:10]}...")
     print(f"📅 Created After: {created_after}")
 
     try:
         response = requests.get(amazon_orders_url, headers=headers)
         orders_data = response.json()
 
-        print("📊 Amazon Orders Response:", orders_data)
+        # If token expired, refresh and retry
+        if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
+            print("🔄 Access token expired, attempting refresh...")
+            new_access_token = refresh_access_token(refresh_token)
+
+            if new_access_token:
+                headers["x-amz-access-token"] = new_access_token
+                response = requests.get(amazon_orders_url, headers=headers)
+                orders_data = response.json()
+            else:
+                return jsonify({"error": "Failed to refresh access token"}), 401
 
         # 🛠 FIX: Ensure response contains 'Orders' before proceeding
         if "payload" in orders_data and "Orders" in orders_data["payload"]:
             orders_list = orders_data["payload"]["Orders"]
 
-            # ✅ Check if there are no orders and return a clean response
             if len(orders_list) == 0:
                 print("⚠️ No orders found in the requested date range.")
                 return jsonify({"message": "No orders found", "orders": []}), 200
 
-            # ✅ Extract order details
             orders_summary = [
                 {
                     "order_id": order.get("AmazonOrderId", "N/A"),
@@ -237,8 +262,6 @@ def get_orders():
     except requests.exceptions.RequestException as e:
         print("❌ API Request Error:", e)
         return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
-
-
 
 if __name__ == "__main__":
     from os import environ
