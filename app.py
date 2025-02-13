@@ -63,22 +63,25 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
 
         DB_CONN.commit()
 
+
+
 @app.route('/start-oauth')
 def start_oauth():
-        # Generate a unique state value
+    """Redirects user to Amazon OAuth login page."""
     state = generate_state()
     session['oauth_state'] = state  # Store state in session
-    """Redirects user to Amazon OAuth login page."""
+
     amazon_auth_url = (
         f"{AUTH_URL}?"
         f"application_id={LWA_APP_ID}&"
-        f"&state={state}" 
+        f"state={state}&"  # <-- Fixed incorrect concatenation
         f"redirect_uri={REDIRECT_URI}&"
         f"version=beta"
-    ).strip()
+    )
 
     print(f"🔗 OAuth Redirect URL: {amazon_auth_url}")  # Debugging
     return redirect(amazon_auth_url)
+
 
 
 
@@ -90,15 +93,16 @@ def callback():
     auth_code = request.args.get("spapi_oauth_code")
     selling_partner_id = request.args.get("selling_partner_id")
 
-    if not auth_code or not selling_partner_id:
-        return jsonify({"error": "Missing parameters"}), 400
+    if not auth_code:
+        return jsonify({"error": "Missing spapi_oauth_code"}), 400
 
-    # Debugging Logs
+    if not selling_partner_id:
+        print("❌ ERROR: Missing selling_partner_id in callback")
+        return jsonify({"error": "Missing selling_partner_id"}), 400
+
     print("🚀 Received auth_code:", auth_code)
     print("🔍 Received selling_partner_id:", selling_partner_id)
-    print("🔑 Sending OAuth Token Exchange Request...")
-
-    # Exchange Authorization Code for Tokens
+    
     payload = {
         "grant_type": "authorization_code",
         "code": auth_code,
@@ -108,19 +112,13 @@ def callback():
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    # Debugging: Print payload before sending the request
-    print("🔍 OAuth Request Payload:", payload)
-
     response = requests.post(TOKEN_URL, data=payload, headers=headers)
     token_data = response.json()
 
-    # Debugging: Print Amazon's response
-    print("🔍 OAuth Response:", token_data)
-
     if "access_token" not in token_data:
+        print("❌ OAuth Token Exchange Failed:", token_data)
         return jsonify({"error": "Failed to exchange token", "details": token_data}), 400
 
-    # Store in database
     save_oauth_tokens(
         selling_partner_id,
         token_data["access_token"],
@@ -128,21 +126,22 @@ def callback():
         token_data["expires_in"]
     )
 
-    # Store in session
     session["access_token"] = token_data["access_token"]
     session["refresh_token"] = token_data["refresh_token"]
     session["selling_partner_id"] = selling_partner_id
 
-    return redirect("https://guillermos-amazing-site-b0c75a.webflow.io/dashboard")
+    return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard?selling_partner_id={selling_partner_id}")
+
 
 
 
 @app.route("/dashboard")
 def dashboard():
     """Fetch stored OAuth tokens from PostgreSQL instead of Flask session."""
-    selling_partner_id = request.args.get("selling_partner_id")
+    selling_partner_id = request.args.get("selling_partner_id") or session.get("selling_partner_id")
 
     if not selling_partner_id:
+        print("❌ ERROR: Missing selling_partner_id in /dashboard")
         return jsonify({"error": "Missing selling_partner_id"}), 400
 
     try:
@@ -165,7 +164,7 @@ def dashboard():
                 "token_type": "bearer"
             })
 
-        print("❌ Error: No tokens found for Selling Partner ID:", selling_partner_id)
+        print("❌ No tokens found for Selling Partner ID:", selling_partner_id)
         return jsonify({"error": "User not authenticated"}), 401
 
     except Exception as e:
