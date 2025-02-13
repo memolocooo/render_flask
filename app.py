@@ -7,6 +7,7 @@ from flask_cors import CORS
 from flask_session import Session
 import requests
 import uuid
+
 # Initialize Flask App
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
@@ -19,7 +20,6 @@ app.config["SESSION_FILE_DIR"] = "./flask_session_data"  # Ensure this exists
 
 # ✅ Initialize Flask-Session after setting config
 Session(app)
-
 
 # Load environment variables
 load_dotenv()
@@ -36,6 +36,9 @@ LWA_CLIENT_SECRET = os.getenv("LWA_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 AUTH_URL = os.getenv("AUTH_URL")
 TOKEN_URL = os.getenv("TOKEN_URL")
+SP_API_BASE_URL = os.getenv("SP_API_BASE_URL")  # Amazon SP-API Endpoint
+USE_SANDBOX = os.getenv("USE_SANDBOX", "False").lower() == "true"  # Convert to boolean
+
 # Use Render's database URL
 DATABASE_URL = os.getenv("DB_URL")
 
@@ -64,7 +67,6 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
         DB_CONN.commit()
 
 
-
 @app.route('/start-oauth')
 def start_oauth():
     """Redirects user to Amazon OAuth login page."""
@@ -74,17 +76,13 @@ def start_oauth():
     amazon_auth_url = (
         f"{AUTH_URL}?"
         f"application_id={LWA_APP_ID}&"
-        f"state={state}&"  # <-- Fixed incorrect concatenation
+        f"state={state}&"
         f"redirect_uri={REDIRECT_URI}&"
         f"version=beta"
     )
 
     print(f"🔗 OAuth Redirect URL: {amazon_auth_url}")  # Debugging
     return redirect(amazon_auth_url)
-
-
-
-
 
 
 @app.route('/callback')
@@ -102,7 +100,7 @@ def callback():
 
     print("🚀 Received auth_code:", auth_code)
     print("🔍 Received selling_partner_id:", selling_partner_id)
-    
+
     payload = {
         "grant_type": "authorization_code",
         "code": auth_code,
@@ -133,63 +131,19 @@ def callback():
     return redirect(f"https://guillermos-amazing-site-b0c75a.webflow.io/dashboard?selling_partner_id={selling_partner_id}")
 
 
+@app.route("/sandbox-test")
+def sandbox_test():
+    """Test Amazon SP-API in Sandbox Mode"""
+    if not USE_SANDBOX:
+        return jsonify({"error": "Sandbox mode is disabled. Enable it in .env"}), 400
 
+    url = f"{SP_API_BASE_URL}/sandbox/some-test-endpoint"
+    headers = {"Authorization": f"Bearer {session.get('access_token')}"}
 
-@app.route("/dashboard")
-def dashboard():
-    """Fetch stored OAuth tokens from PostgreSQL instead of Flask session."""
-    selling_partner_id = request.args.get("selling_partner_id") or session.get("selling_partner_id")
-
-    if not selling_partner_id:
-        print("❌ ERROR: Missing selling_partner_id in /dashboard")
-        return jsonify({"error": "Missing selling_partner_id"}), 400
-
-    try:
-        with DB_CONN.cursor() as cur:
-            cur.execute("""
-                SELECT access_token, refresh_token, expires_at 
-                FROM amazon_oauth_tokens 
-                WHERE selling_partner_id = %s
-            """, (selling_partner_id,))
-            result = cur.fetchone()
-
-        if result:
-            access_token, refresh_token, expires_at = result
-            return jsonify({
-                "message": "Amazon SP-API Connected Successfully!",
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "selling_partner_id": selling_partner_id,
-                "expires_at": expires_at.isoformat(),
-                "token_type": "bearer"
-            })
-
-        print("❌ No tokens found for Selling Partner ID:", selling_partner_id)
-        return jsonify({"error": "User not authenticated"}), 401
-
-    except Exception as e:
-        print("❌ Database Error:", e)
-        return jsonify({"error": "Database connection failed", "details": str(e)}), 500
-
-
-
-@app.route("/db-test")
-def db_test():
-    try:
-        with DB_CONN.cursor() as cur:
-            cur.execute("SELECT 1")
-            return jsonify({"message": "✅ PostgreSQL Connection Successful!"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-    return redirect("https://guillermos-amazing-site-b0c75a.webflow.io/dashboard")
+    response = requests.get(url, headers=headers)
+    return jsonify(response.json())
 
 
 if __name__ == "__main__":
     from os import environ
     app.run(host="0.0.0.0", port=int(environ.get("PORT", 5000)))
-
-
-
-
