@@ -174,37 +174,47 @@ def get_orders():
     access_token = request.args.get("access_token")
 
     if not selling_partner_id or not access_token:
+        print("❌ ERROR: Missing selling_partner_id or access_token")
         return jsonify({"error": "Missing selling_partner_id or access_token"}), 400
 
-    amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders"
+    # Define Amazon Marketplace ID (Use the correct ID for your region)
+    marketplace_id = "A1AM78C64UM0Y8"  # Mexico Marketplace ID (Adjust if needed)
+    
+    amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders?MarketplaceIds={marketplace_id}"
     headers = {
         "x-amz-access-token": access_token,
         "Content-Type": "application/json"
     }
 
     print(f"📡 Fetching orders for Selling Partner ID: {selling_partner_id}")
+    print(f"🔗 Amazon API URL: {amazon_orders_url}")
+    print(f"🔑 Access Token (masked): {access_token[:10]}...")
 
-    response = requests.get(amazon_orders_url, headers=headers)
-    orders_data = response.json()
+    try:
+        response = requests.get(amazon_orders_url, headers=headers)
+        orders_data = response.json()
 
-    # Debugging: Print Amazon's response
-    print("📊 Amazon Orders Response:", orders_data)
+        print("📊 Amazon Orders Response:", orders_data)
 
-    if "orders" not in orders_data:
-        return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
+        if "orders" not in orders_data:
+            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
 
-    # Extracting order data
-    orders_summary = []
-    for order in orders_data["orders"]:
-        orders_summary.append({
-            "order_id": order.get("AmazonOrderId", "N/A"),
-            "status": order.get("OrderStatus", "N/A"),
-            "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
-            "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
-            "purchase_date": order.get("PurchaseDate", "N/A")
-        })
+        orders_summary = [
+            {
+                "order_id": order.get("AmazonOrderId", "N/A"),
+                "status": order.get("OrderStatus", "N/A"),
+                "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
+                "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
+                "purchase_date": order.get("PurchaseDate", "N/A")
+            }
+            for order in orders_data["orders"]
+        ]
 
-    return jsonify({"orders": orders_summary})
+        return jsonify({"orders": orders_summary})
+
+    except requests.exceptions.RequestException as e:
+        print("❌ API Request Error:", e)
+        return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
 
 
 if __name__ == "__main__":
