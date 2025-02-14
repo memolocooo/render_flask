@@ -7,6 +7,9 @@ from flask_cors import CORS
 from flask_session import Session
 import psycopg2
 from datetime import datetime, timedelta
+import csv
+from flask import send_file
+
 
 # Load environment variables
 load_dotenv()
@@ -222,21 +225,34 @@ def get_orders():
 
 
 
-
 @app.route('/download-orders', methods=['GET'])
 def download_orders():
-    """Fetch orders from Amazon SP-API and generate a CSV file."""
+    """Fetch orders from Amazon SP-API and generate a downloadable CSV file."""
     selling_partner_id = request.args.get("selling_partner_id")
     access_token = request.args.get("access_token")
     refresh_token = request.args.get("refresh_token")
 
-    if not selling_partner_id or not access_token or not refresh_token:
+    if not selling_partner_id:
+        return jsonify({"error": "Missing selling_partner_id"}), 400
+
+    stored_tokens = get_stored_tokens(selling_partner_id)
+    if stored_tokens:
+        stored_access_token, stored_refresh_token, expires_at = stored_tokens
+        if not access_token:
+            access_token = stored_access_token
+        if not refresh_token:
+            refresh_token = stored_refresh_token
+
+        # Check if the access token is expired
+        if expires_at and datetime.utcnow() >= expires_at:
+            print("🔄 Token expired, refreshing...")
+            access_token = refresh_access_token(selling_partner_id, refresh_token)
+
+    if not access_token or not refresh_token:
         return jsonify({"error": "Missing authentication credentials"}), 400
 
     # Define Amazon Marketplace ID (Mexico: A1AM78C64UM0Y8)
     marketplace_id = "A1AM78C64UM0Y8"
-
-    # Get orders from the last 30 days
     created_after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
 
     # Construct the API request URL
@@ -257,6 +273,17 @@ def download_orders():
     try:
         response = requests.get(amazon_orders_url, headers=headers)
         orders_data = response.json()
+
+        if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
+            print("🔄 Access token expired, attempting refresh...")
+            new_access_token = refresh_access_token(selling_partner_id, refresh_token)
+
+            if new_access_token:
+                headers["x-amz-access-token"] = new_access_token
+                response = requests.get(amazon_orders_url, headers=headers)
+                orders_data = response.json()
+            else:
+                return jsonify({"error": "Failed to refresh access token"}), 401
 
         if "payload" in orders_data and "Orders" in orders_data["payload"]:
             orders_list = orders_data["payload"]["Orders"]
