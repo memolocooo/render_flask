@@ -72,6 +72,16 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
             expires_at = EXCLUDED.expires_at
         """, (selling_partner_id, access_token, refresh_token, expires_at))
 
+        cur.execute("""
+        INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
+        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (order_id) DO UPDATE
+        SET order_status = EXCLUDED.order_status,
+        total_amount = EXCLUDED.total_amount,
+        last_updated = NOW()
+        """, (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date))
+
+
         # Commit the transaction
         conn.commit()
         cur.close()
