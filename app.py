@@ -188,6 +188,55 @@ def callback():
     return jsonify({"error": "Failed to obtain tokens", "details": token_data}), 400
 
 
+def save_orders_to_db(order_data, selling_partner_id):
+    """Save Amazon orders to the database."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS amazon_orders (
+            order_id TEXT PRIMARY KEY,
+            selling_partner_id TEXT,
+            order_status TEXT,
+            total_amount FLOAT,
+            currency TEXT,
+            purchase_date TIMESTAMP,
+            last_updated TIMESTAMP DEFAULT NOW()
+        )
+        """)
+
+        for order in order_data:
+            order_id = order.get("AmazonOrderId", "N/A")
+            order_status = order.get("OrderStatus", "N/A")
+            total_amount = float(order.get("OrderTotal", {}).get("Amount", 0))
+            currency = order.get("OrderTotal", {}).get("CurrencyCode", "N/A")
+            purchase_date = order.get("PurchaseDate", "N/A")
+
+            cur.execute("""
+            INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (order_id) DO UPDATE
+            SET order_status = EXCLUDED.order_status,
+                total_amount = EXCLUDED.total_amount,
+                last_updated = NOW()
+            """, (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Orders saved successfully!")
+
+    except psycopg2.Error as e:
+        print(f"❌ Database Error: {e}")
+        if conn:
+            conn.rollback()
+        return {"error": "Database error", "details": str(e)}
+
+    finally:
+        if conn:
+            conn.close()
+
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
     """Fetch orders from Amazon SP-API for the last 200 days."""
@@ -248,6 +297,9 @@ def get_orders():
             if len(orders_list) == 0:
                 return jsonify({"message": "No orders found", "orders": []}), 200
 
+            # Save orders to the database
+            save_orders_to_db(orders_list, selling_partner_id)
+
             orders_summary = [
                 {
                     "order_id": order.get("AmazonOrderId", "N/A"),
@@ -266,6 +318,7 @@ def get_orders():
 
     except requests.exceptions.RequestException as e:
         return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
+
 
 
 
