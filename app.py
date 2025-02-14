@@ -232,7 +232,7 @@ def callback():
 
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
-    """Fetch orders from Amazon SP-API for the last 200 days."""
+    """Fetch Amazon orders, including fees, refunds, and shipping costs."""
     selling_partner_id = request.args.get("selling_partner_id")
     access_token = request.args.get("access_token")
     refresh_token = request.args.get("refresh_token")
@@ -249,68 +249,58 @@ def get_orders():
             refresh_token = stored_refresh_token
 
         if expires_at and datetime.utcnow() >= expires_at:
-            print("🔄 Token expired, refreshing...")
             access_token = refresh_access_token(selling_partner_id, refresh_token)
 
-    if not access_token or not refresh_token:
+    if not access_token:
         return jsonify({"error": "Missing authentication credentials"}), 400
 
     marketplace_id = "A1AM78C64UM0Y8"
-    created_after = (datetime.utcnow() - timedelta(days=200)).isoformat() + "Z"
+    created_after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
 
-    amazon_orders_url = (
-        f"{SP_API_BASE_URL}/orders/v0/orders"
-        f"?MarketplaceIds={marketplace_id}"
-        f"&CreatedAfter={created_after}"
-    )
+    amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders?MarketplaceIds={marketplace_id}&CreatedAfter={created_after}"
 
     headers = {
         "x-amz-access-token": access_token,
         "Content-Type": "application/json"
     }
 
-    try:
-        response = requests.get(amazon_orders_url, headers=headers)
-        orders_data = response.json()
+    response = requests.get(amazon_orders_url, headers=headers)
+    orders_data = response.json()
 
-        if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
-            print("🔄 Access token expired, attempting refresh...")
-            new_access_token = refresh_access_token(selling_partner_id, refresh_token)
+    if "errors" in orders_data:
+        return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
 
-            if new_access_token:
-                headers["x-amz-access-token"] = new_access_token
-                response = requests.get(amazon_orders_url, headers=headers)
-                orders_data = response.json()
-            else:
-                return jsonify({"error": "Failed to refresh access token"}), 401
+    total_sales = 0
+    total_units = 0
+    total_fees = 0
+    total_shipping = 0
+    total_refunds = 0
 
-        if "payload" in orders_data and "Orders" in orders_data["payload"]:
-            orders_list = orders_data["payload"]["Orders"]
+    orders_list = orders_data.get("payload", {}).get("Orders", [])
+    
+    for order in orders_list:
+        order_id = order.get("AmazonOrderId", "N/A")
+        total_sales += float(order.get("OrderTotal", {}).get("Amount", 0))
+        total_units += 1  # Assuming 1 unit per order (adjust based on items in order)
 
-            if len(orders_list) == 0:
-                return jsonify({"message": "No orders found", "orders": []}), 200
+        # Get detailed order items
+        order_items_url = f"{SP_API_BASE_URL}/orders/v0/orders/{order_id}/orderItems"
+        items_response = requests.get(order_items_url, headers=headers)
+        items_data = items_response.json()
 
-            # Save orders to the database
-            save_orders_to_db(orders_list, selling_partner_id)
+        for item in items_data.get("OrderItems", []):
+            total_fees += float(item.get("ItemFees", [{}])[0].get("Amount", {}).get("Amount", 0))
+            total_shipping += float(item.get("ShippingPrice", {}).get("Amount", 0))
+            total_refunds += float(item.get("ItemFees", [{}])[0].get("FeeType", "Refund") == "Refund")
 
-            orders_summary = [
-                {
-                    "order_id": order.get("AmazonOrderId", "N/A"),
-                    "status": order.get("OrderStatus", "N/A"),
-                    "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
-                    "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
-                    "purchase_date": order.get("PurchaseDate", "N/A")
-                }
-                for order in orders_list
-            ]
-
-            return jsonify({"orders": orders_summary})
-
-        else:
-            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
-
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
+    return jsonify({
+        "sales": total_sales,
+        "units_sold": total_units,
+        "amazon_fees": total_fees,
+        "shipping_costs": total_shipping,
+        "refund_costs": total_refunds,
+        "net_profit": total_sales - total_fees - total_shipping - total_refunds
+    })
 
 
 
