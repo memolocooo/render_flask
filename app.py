@@ -212,7 +212,8 @@ def store_orders_in_database(selling_partner_id, orders):
         
         DB_CONN.commit()
 
-        
+
+
 
 @app.route('/fetch-reports', methods=['GET'])
 def fetch_reports():
@@ -233,6 +234,43 @@ def fetch_reports():
         return jsonify({"message": "Reports saved successfully!", "reports": reports_data["reports"]})
 
     return jsonify({"error": "Failed to fetch reports", "details": reports_data}), 400
+
+
+def fetch_reports_from_amazon(selling_partner_id):
+    """Request financial reports from Amazon Reports API."""
+    amazon_reports_url = f"{SP_API_BASE_URL}/reports/v0/reports"
+
+    headers = {
+        "x-amz-access-token": get_valid_access_token(selling_partner_id),
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.get(amazon_reports_url, headers=headers)
+        reports_data = response.json()
+
+        return reports_data
+    except requests.exceptions.RequestException as e:
+        print("❌ API Request Error:", e)
+        return {"error": "Failed to connect to Amazon", "details": str(e)}
+
+def store_reports_in_database(selling_partner_id, reports):
+    """Save Amazon financial reports into PostgreSQL for future analysis."""
+    with DB_CONN.cursor() as cur:
+        for report in reports:
+            cur.execute("""
+                INSERT INTO amazon_reports (selling_partner_id, report_id, report_type, created_date, data)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (report_id) DO NOTHING;
+            """, (
+                selling_partner_id,
+                report.get("reportId"),
+                report.get("reportType"),
+                report.get("createdDate"),
+                str(report.get("data"))  # Store JSON as a string
+            ))
+        
+        DB_CONN.commit()
 
 
 
