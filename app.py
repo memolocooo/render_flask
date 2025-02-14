@@ -146,82 +146,131 @@ def callback():
 
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
-    """Fetch orders from Amazon SP-API for the last 200 days."""
+    """Fetch orders from database first, if not found then fetch from Amazon SP-API."""
     selling_partner_id = request.args.get("selling_partner_id")
-    access_token = request.args.get("access_token")
-    refresh_token = request.args.get("refresh_token")
 
     if not selling_partner_id:
         return jsonify({"error": "Missing selling_partner_id"}), 400
 
-    stored_tokens = get_stored_tokens(selling_partner_id)
-    if stored_tokens:
-        stored_access_token, stored_refresh_token, expires_at = stored_tokens
-        if not access_token:
-            access_token = stored_access_token
-        if not refresh_token:
-            refresh_token = stored_refresh_token
+    # 1️⃣ Check if orders exist in the database
+    stored_orders = get_stored_orders(selling_partner_id)
 
-        if expires_at and datetime.utcnow() >= expires_at:
-            print("🔄 Token expired, refreshing...")
-            access_token = refresh_access_token(selling_partner_id, refresh_token)
+    if stored_orders:
+        print("📊 Returning orders from database cache.")
+        return jsonify({"orders": stored_orders})
 
-    if not access_token or not refresh_token:
-        return jsonify({"error": "Missing authentication credentials"}), 400
+    print("🔍 No orders found in database, fetching from SP-API...")
 
-    marketplace_id = "A1AM78C64UM0Y8"
-    created_after = (datetime.utcnow() - timedelta(days=200)).isoformat() + "Z"
+    # 2️⃣ Fetch from API if not found in DB
+    orders_data = fetch_orders_from_amazon(selling_partner_id)
 
-    amazon_orders_url = (
-        f"{SP_API_BASE_URL}/orders/v0/orders"
-        f"?MarketplaceIds={marketplace_id}"
-        f"&CreatedAfter={created_after}"
-    )
+    if "orders" in orders_data:
+        # 3️⃣ Store in the database for future requests
+        store_orders_in_database(selling_partner_id, orders_data["orders"])
+        return jsonify(orders_data)
+
+    return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
+
+def get_stored_orders(selling_partner_id):
+    """Retrieve stored orders from PostgreSQL database."""
+    with DB_CONN.cursor() as cur:
+        cur.execute("""
+            SELECT order_id, status, total, currency, purchase_date 
+            FROM amazon_orders 
+            WHERE selling_partner_id = %s
+            ORDER BY purchase_date DESC
+        """, (selling_partner_id,))
+
+        orders = cur.fetchall()
+        return [
+            {
+                "order_id": row[0],
+                "status": row[1],
+                "total": row[2],
+                "currency": row[3],
+                "purchase_date": row[4]
+            }
+            for row in orders
+        ]
+
+def store_orders_in_database(selling_partner_id, orders):
+    """Store fetched orders into PostgreSQL for future use."""
+    with DB_CONN.cursor() as cur:
+        for order in orders:
+            cur.execute("""
+                INSERT INTO amazon_orders (selling_partner_id, order_id, status, total, currency, purchase_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (order_id) DO NOTHING;
+            """, (
+                selling_partner_id,
+                order.get("order_id"),
+                order.get("status"),
+                order.get("total"),
+                order.get("currency"),
+                order.get("purchase_date")
+            ))
+        
+        DB_CONN.commit()
+
+
+
+
+@app.route('/fetch-reports', methods=['GET'])
+def fetch_reports():
+    """Fetch financial reports from Amazon Reports API and store in PostgreSQL."""
+    selling_partner_id = request.args.get("selling_partner_id")
+
+    if not selling_partner_id:
+        return jsonify({"error": "Missing selling_partner_id"}), 400
+
+    print(f"📊 Fetching reports for {selling_partner_id}")
+
+    # 1️⃣ Call Amazon Reports API
+    reports_data = fetch_reports_from_amazon(selling_partner_id)
+
+    if "reports" in reports_data:
+        # 2️⃣ Store in the database
+        store_reports_in_database(selling_partner_id, reports_data["reports"])
+        return jsonify({"message": "Reports saved successfully!", "reports": reports_data["reports"]})
+
+    return jsonify({"error": "Failed to fetch reports", "details": reports_data}), 400
+
+
+def fetch_reports_from_amazon(selling_partner_id):
+    """Request financial reports from Amazon Reports API."""
+    amazon_reports_url = f"{SP_API_BASE_URL}/reports/v0/reports"
 
     headers = {
-        "x-amz-access-token": access_token,
+        "x-amz-access-token": get_valid_access_token(selling_partner_id),
         "Content-Type": "application/json"
     }
 
     try:
-        response = requests.get(amazon_orders_url, headers=headers)
-        orders_data = response.json()
+        response = requests.get(amazon_reports_url, headers=headers)
+        reports_data = response.json()
 
-        if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
-            print("🔄 Access token expired, attempting refresh...")
-            new_access_token = refresh_access_token(selling_partner_id, refresh_token)
-
-            if new_access_token:
-                headers["x-amz-access-token"] = new_access_token
-                response = requests.get(amazon_orders_url, headers=headers)
-                orders_data = response.json()
-            else:
-                return jsonify({"error": "Failed to refresh access token"}), 401
-
-        if "payload" in orders_data and "Orders" in orders_data["payload"]:
-            orders_list = orders_data["payload"]["Orders"]
-
-            if len(orders_list) == 0:
-                return jsonify({"message": "No orders found", "orders": []}), 200
-
-            orders_summary = [
-                {
-                    "order_id": order.get("AmazonOrderId", "N/A"),
-                    "status": order.get("OrderStatus", "N/A"),
-                    "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
-                    "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
-                    "purchase_date": order.get("PurchaseDate", "N/A")
-                }
-                for order in orders_list
-            ]
-
-            return jsonify({"orders": orders_summary})
-
-        else:
-            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
-
+        return reports_data
     except requests.exceptions.RequestException as e:
-        return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
+        print("❌ API Request Error:", e)
+        return {"error": "Failed to connect to Amazon", "details": str(e)}
+
+def store_reports_in_database(selling_partner_id, reports):
+    """Save Amazon financial reports into PostgreSQL for future analysis."""
+    with DB_CONN.cursor() as cur:
+        for report in reports:
+            cur.execute("""
+                INSERT INTO amazon_reports (selling_partner_id, report_id, report_type, created_date, data)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (report_id) DO NOTHING;
+            """, (
+                selling_partner_id,
+                report.get("reportId"),
+                report.get("reportType"),
+                report.get("createdDate"),
+                str(report.get("data"))  # Store JSON as a string
+            ))
+        
+        DB_CONN.commit()
 
 
 
