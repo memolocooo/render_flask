@@ -255,7 +255,7 @@ def get_orders():
         return jsonify({"error": "Missing authentication credentials"}), 400
 
     marketplace_id = "A1AM78C64UM0Y8"
-    created_after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
+    created_after = (datetime.utcnow() - timedelta(days=365)).isoformat() + "Z"
 
     amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders?MarketplaceIds={marketplace_id}&CreatedAfter={created_after}"
 
