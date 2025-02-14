@@ -221,6 +221,76 @@ def get_orders():
         return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
 
 
+
+
+@app.route('/download-orders', methods=['GET'])
+def download_orders():
+    """Fetch orders from Amazon SP-API and generate a CSV file."""
+    selling_partner_id = request.args.get("selling_partner_id")
+    access_token = request.args.get("access_token")
+    refresh_token = request.args.get("refresh_token")
+
+    if not selling_partner_id or not access_token or not refresh_token:
+        return jsonify({"error": "Missing authentication credentials"}), 400
+
+    # Define Amazon Marketplace ID (Mexico: A1AM78C64UM0Y8)
+    marketplace_id = "A1AM78C64UM0Y8"
+
+    # Get orders from the last 30 days
+    created_after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
+
+    # Construct the API request URL
+    amazon_orders_url = (
+        f"{SP_API_BASE_URL}/orders/v0/orders"
+        f"?MarketplaceIds={marketplace_id}"
+        f"&CreatedAfter={created_after}"
+    )
+
+    headers = {
+        "x-amz-access-token": access_token,
+        "Content-Type": "application/json"
+    }
+
+    print(f"📡 Fetching orders for Selling Partner ID: {selling_partner_id}")
+    print(f"🔗 Amazon API URL: {amazon_orders_url}")
+
+    try:
+        response = requests.get(amazon_orders_url, headers=headers)
+        orders_data = response.json()
+
+        if "payload" in orders_data and "Orders" in orders_data["payload"]:
+            orders_list = orders_data["payload"]["Orders"]
+        else:
+            print("❌ ERROR: Unexpected API response format")
+            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
+
+        # Define CSV file path
+        csv_filename = "orders.csv"
+        csv_filepath = os.path.join(os.getcwd(), csv_filename)
+
+        # Write fetched orders to CSV
+        with open(csv_filepath, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=["order_id", "status", "total", "currency", "purchase_date"])
+            writer.writeheader()
+
+            for order in orders_list:
+                writer.writerow({
+                    "order_id": order.get("AmazonOrderId", "N/A"),
+                    "status": order.get("OrderStatus", "N/A"),
+                    "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
+                    "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
+                    "purchase_date": order.get("PurchaseDate", "N/A")
+                })
+
+        # Send file as an attachment for download
+        return send_file(csv_filepath, as_attachment=True)
+
+    except requests.exceptions.RequestException as e:
+        print("❌ API Request Error:", e)
+        return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
+
+
+
 if __name__ == "__main__":
     from os import environ
     app.run(host="0.0.0.0", port=int(environ.get("PORT", 5000)))
