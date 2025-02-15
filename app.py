@@ -21,7 +21,8 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY")
 # Enable CORS for Webflow
 CORS(app, supports_credentials=True, origins=["https://guillermos-amazing-site-b0c75a.webflow.io"])
 
-redis_client = redis.StrictRedis(host="localhost", port=6379, db=0, decode_responses=True)
+REDIS_URL = os.getenv("REDIS_URL")  # Get Redis URL from Render Env Variables
+redis_client = redis.StrictRedis.from_url(REDIS_URL, decode_responses=True)
 
 # Configure Flask Session
 app.config["SESSION_TYPE"] = "filesystem"
