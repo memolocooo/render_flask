@@ -9,6 +9,7 @@ import psycopg2
 from datetime import datetime, timedelta
 import csv
 from flask import send_file
+import redis
 
 
 # Load environment variables
@@ -19,6 +20,8 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
 # Enable CORS for Webflow
 CORS(app, supports_credentials=True, origins=["https://guillermos-amazing-site-b0c75a.webflow.io"])
+
+redis_client = redis.StrictRedis(host="localhost", port=6379, db=0, decode_responses=True)
 
 # Configure Flask Session
 app.config["SESSION_TYPE"] = "filesystem"
@@ -230,9 +233,10 @@ def callback():
     return jsonify({"error": "Failed to obtain tokens", "details": token_data}), 400
 
 
+
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
-    """Fetch orders from Amazon SP-API for the last 200 days."""
+    """Fetch orders from Amazon SP-API for the last 200 days with caching."""
     selling_partner_id = request.args.get("selling_partner_id")
     access_token = request.args.get("access_token")
     refresh_token = request.args.get("refresh_token")
@@ -240,14 +244,22 @@ def get_orders():
     if not selling_partner_id:
         return jsonify({"error": "Missing selling_partner_id"}), 400
 
+    # 🔄 Check Redis Cache before making API calls
+    cache_key = f"orders_{selling_partner_id}"
+    cached_orders = redis_client.get(cache_key)
+
+    if cached_orders:
+        print("✅ Returning cached orders")
+        return jsonify({"orders": json.loads(cached_orders)})
+
+    # 🔄 Retrieve stored tokens from DB
     stored_tokens = get_stored_tokens(selling_partner_id)
     if stored_tokens:
         stored_access_token, stored_refresh_token, expires_at = stored_tokens
-        if not access_token:
-            access_token = stored_access_token
-        if not refresh_token:
-            refresh_token = stored_refresh_token
+        access_token = access_token or stored_access_token
+        refresh_token = refresh_token or stored_refresh_token
 
+        # Only refresh if the token is expired
         if expires_at and datetime.utcnow() >= expires_at:
             print("🔄 Token expired, refreshing...")
             access_token = refresh_access_token(selling_partner_id, refresh_token)
@@ -273,6 +285,7 @@ def get_orders():
         response = requests.get(amazon_orders_url, headers=headers)
         orders_data = response.json()
 
+        # 🔄 Handle expired access token properly
         if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
             print("🔄 Access token expired, attempting refresh...")
             new_access_token = refresh_access_token(selling_partner_id, refresh_token)
@@ -287,12 +300,13 @@ def get_orders():
         if "payload" in orders_data and "Orders" in orders_data["payload"]:
             orders_list = orders_data["payload"]["Orders"]
 
-            if len(orders_list) == 0:
+            if not orders_list:
                 return jsonify({"message": "No orders found", "orders": []}), 200
 
             # Save orders to the database
             save_orders_to_db(orders_list, selling_partner_id)
 
+            # Format response
             orders_summary = [
                 {
                     "order_id": order.get("AmazonOrderId", "N/A"),
@@ -303,6 +317,9 @@ def get_orders():
                 }
                 for order in orders_list
             ]
+
+            # 🔥 Cache the response in Redis for 5 minutes
+            redis_client.set(cache_key, json.dumps(orders_summary), ex=300)  
 
             return jsonify({"orders": orders_summary})
 
