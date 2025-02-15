@@ -92,17 +92,20 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
 
 
 def get_stored_tokens(selling_partner_id):
+    """Retrieve stored tokens from database."""
     with DB_CONN.cursor() as cur:
         cur.execute("""
             SELECT access_token, refresh_token, expires_at 
-            FROM amazon_tokens  -- Corrected table name
+            FROM amazon_oauth_tokens 
             WHERE selling_partner_id = %s
         """, (selling_partner_id,))
         return cur.fetchone()
 
 
-
 def refresh_access_token(selling_partner_id, refresh_token):
+    """Refresh Amazon SP-API access token using the refresh token."""
+    print("🔄 Refreshing expired access token...")
+
     payload = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -111,20 +114,15 @@ def refresh_access_token(selling_partner_id, refresh_token):
     }
 
     response = requests.post(TOKEN_URL, data=payload)
-    
-    if response.status_code != 200:
-        print("❌ Error refreshing access token:", response.text)
-        return None  # Return None if refresh fails
-
     token_data = response.json()
-    
+
     if "access_token" in token_data:
+        print("✅ Access token refreshed successfully!")
         save_oauth_tokens(selling_partner_id, token_data["access_token"], refresh_token, token_data["expires_in"])
         return token_data["access_token"]
-
+    
     print("❌ Failed to refresh access token:", token_data)
     return None
-
 
 
 def save_orders_to_db(order_data, selling_partner_id):
@@ -152,29 +150,14 @@ def save_orders_to_db(order_data, selling_partner_id):
             currency = order.get("OrderTotal", {}).get("CurrencyCode", "N/A")
             purchase_date = order.get("PurchaseDate", "N/A")
 
-        if not order_data or not isinstance(order_data, list):
-            print("❌ No valid orders to save")
-            return
-
-        for order in order_data:
-            order_id = order.get("AmazonOrderId", "N/A")
-            order_status = order.get("OrderStatus", "N/A")
-            total_amount = float(order.get("OrderTotal", {}).get("Amount", 0))
-            currency = order.get("OrderTotal", {}).get("CurrencyCode", "N/A")
-            purchase_date = order.get("PurchaseDate", None)  # Fix handling for DB NULL
-
-
-        cur.execute("""
-        INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
+            cur.execute("""
+            INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (order_id) DO UPDATE
             SET order_status = EXCLUDED.order_status,
-            total_amount = EXCLUDED.total_amount,
-            currency = EXCLUDED.currency,
-            purchase_date = EXCLUDED.purchase_date,
-            last_updated = NOW()
-            """, (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date if purchase_date != "N/A" else None))
-
+                total_amount = EXCLUDED.total_amount,
+                last_updated = NOW()
+            """, (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date))
 
         conn.commit()
         cur.close()
@@ -249,7 +232,7 @@ def callback():
 
 @app.route('/get-orders', methods=['GET'])
 def get_orders():
-    """Fetch Amazon orders, including fees, refunds, and shipping costs."""
+    """Fetch orders from Amazon SP-API for the last 200 days."""
     selling_partner_id = request.args.get("selling_partner_id")
     access_token = request.args.get("access_token")
     refresh_token = request.args.get("refresh_token")
@@ -266,73 +249,68 @@ def get_orders():
             refresh_token = stored_refresh_token
 
         if expires_at and datetime.utcnow() >= expires_at:
+            print("🔄 Token expired, refreshing...")
             access_token = refresh_access_token(selling_partner_id, refresh_token)
 
-    if not access_token:
+    if not access_token or not refresh_token:
         return jsonify({"error": "Missing authentication credentials"}), 400
 
     marketplace_id = "A1AM78C64UM0Y8"
-    created_after = (datetime.utcnow() - timedelta(days=365)).isoformat() + "Z"
+    created_after = (datetime.utcnow() - timedelta(days=200)).isoformat() + "Z"
 
-    amazon_orders_url = f"{SP_API_BASE_URL}/orders/v0/orders?MarketplaceIds={marketplace_id}&CreatedAfter={created_after}"
+    amazon_orders_url = (
+        f"{SP_API_BASE_URL}/orders/v0/orders"
+        f"?MarketplaceIds={marketplace_id}"
+        f"&CreatedAfter={created_after}"
+    )
 
     headers = {
         "x-amz-access-token": access_token,
         "Content-Type": "application/json"
     }
 
-    response = requests.get(amazon_orders_url, headers=headers)
-    orders_data = response.json()
+    try:
+        response = requests.get(amazon_orders_url, headers=headers)
+        orders_data = response.json()
 
-    if "errors" in orders_data:
-        return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
+        if "errors" in orders_data and orders_data["errors"][0]["code"] == "Unauthorized":
+            print("🔄 Access token expired, attempting refresh...")
+            new_access_token = refresh_access_token(selling_partner_id, refresh_token)
 
-    total_sales = 0
-    total_units = 0
-    total_fees = 0
-    total_shipping = 0
-    total_refunds = 0
+            if new_access_token:
+                headers["x-amz-access-token"] = new_access_token
+                response = requests.get(amazon_orders_url, headers=headers)
+                orders_data = response.json()
+            else:
+                return jsonify({"error": "Failed to refresh access token"}), 401
 
+        if "payload" in orders_data and "Orders" in orders_data["payload"]:
+            orders_list = orders_data["payload"]["Orders"]
 
-    orders_list = orders_data.get("payload", {}).get("Orders", [])
-    if not orders_list:
-        return jsonify({"error": "No orders found"}), 404
+            if len(orders_list) == 0:
+                return jsonify({"message": "No orders found", "orders": []}), 200
 
+            # Save orders to the database
+            save_orders_to_db(orders_list, selling_partner_id)
 
+            orders_summary = [
+                {
+                    "order_id": order.get("AmazonOrderId", "N/A"),
+                    "status": order.get("OrderStatus", "N/A"),
+                    "total": float(order.get("OrderTotal", {}).get("Amount", 0)),
+                    "currency": order.get("OrderTotal", {}).get("CurrencyCode", "N/A"),
+                    "purchase_date": order.get("PurchaseDate", "N/A")
+                }
+                for order in orders_list
+            ]
 
-    
-    for order in orders_list:
-        order_id = order.get("AmazonOrderId", "N/A")
-        total_sales += float(order.get("OrderTotal", {}).get("Amount", 0))
+            return jsonify({"orders": orders_summary})
 
-        # Get detailed order items (Move API request above)
-        order_items_url = f"{SP_API_BASE_URL}/orders/v0/orders/{order_id}/orderItems"
-        items_response = requests.get(order_items_url, headers=headers)
-        items_data = items_response.json()
+        else:
+            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
 
-        for item in items_data.get("OrderItems", []):
-            total_units += int(item.get("QuantityOrdered", 1))
-
-
-
-        # Get detailed order items
-        order_items_url = f"{SP_API_BASE_URL}/orders/v0/orders/{order_id}/orderItems"
-        items_response = requests.get(order_items_url, headers=headers)
-        items_data = items_response.json()
-
-        for item in items_data.get("OrderItems", []):
-            total_fees += float(item.get("ItemFees", [{}])[0].get("Amount", {}).get("Amount", 0))
-            total_shipping += float(item.get("ShippingPrice", {}).get("Amount", 0))
-            total_refunds += float(item.get("ItemFees", [{}])[0].get("FeeType", "Refund") == "Refund")
-
-    return jsonify({
-        "sales": total_sales,
-        "units_sold": total_units,
-        "amazon_fees": total_fees,
-        "shipping_costs": total_shipping,
-        "refund_costs": total_refunds,
-        "net_profit": total_sales - total_fees - total_shipping - total_refunds
-    })
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": "Failed to connect to Amazon", "details": str(e)}), 500
 
 
 
@@ -397,19 +375,11 @@ def download_orders():
             else:
                 return jsonify({"error": "Failed to refresh access token"}), 401
 
-        orders_list = orders_data.get("payload", {}).get("Orders", [])
-
-        # ✅ Check if orders_list is empty
-        if not orders_list:
-            return jsonify({"error": "No orders found"}), 404
-
-        
-        orders_list = orders_data.get("payload", {}).get("Orders", [])
-
-        # ✅ Check if orders_list is empty
-        if not orders_list:
-            return jsonify({"error": "No orders found"}), 404
-
+        if "payload" in orders_data and "Orders" in orders_data["payload"]:
+            orders_list = orders_data["payload"]["Orders"]
+        else:
+            print("❌ ERROR: Unexpected API response format")
+            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
 
         # Define CSV file path
         csv_filename = "orders.csv"
