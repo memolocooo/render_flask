@@ -92,20 +92,17 @@ def save_oauth_tokens(selling_partner_id, access_token, refresh_token, expires_i
 
 
 def get_stored_tokens(selling_partner_id):
-    """Retrieve stored tokens from database."""
     with DB_CONN.cursor() as cur:
         cur.execute("""
             SELECT access_token, refresh_token, expires_at 
-            FROM amazon_oauth_tokens 
+            FROM amazon_tokens  -- Corrected table name
             WHERE selling_partner_id = %s
         """, (selling_partner_id,))
         return cur.fetchone()
 
 
-def refresh_access_token(selling_partner_id, refresh_token):
-    """Refresh Amazon SP-API access token using the refresh token."""
-    print("🔄 Refreshing expired access token...")
 
+def refresh_access_token(selling_partner_id, refresh_token):
     payload = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -114,15 +111,20 @@ def refresh_access_token(selling_partner_id, refresh_token):
     }
 
     response = requests.post(TOKEN_URL, data=payload)
-    token_data = response.json()
+    
+    if response.status_code != 200:
+        print("❌ Error refreshing access token:", response.text)
+        return None  # Return None if refresh fails
 
+    token_data = response.json()
+    
     if "access_token" in token_data:
-        print("✅ Access token refreshed successfully!")
         save_oauth_tokens(selling_partner_id, token_data["access_token"], refresh_token, token_data["expires_in"])
         return token_data["access_token"]
-    
+
     print("❌ Failed to refresh access token:", token_data)
     return None
+
 
 
 def save_orders_to_db(order_data, selling_partner_id):
@@ -150,14 +152,17 @@ def save_orders_to_db(order_data, selling_partner_id):
             currency = order.get("OrderTotal", {}).get("CurrencyCode", "N/A")
             purchase_date = order.get("PurchaseDate", "N/A")
 
-            cur.execute("""
-            INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
+        cur.execute("""
+        INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (order_id) DO UPDATE
             SET order_status = EXCLUDED.order_status,
-                total_amount = EXCLUDED.total_amount,
-                last_updated = NOW()
-            """, (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date))
+            total_amount = EXCLUDED.total_amount,
+            currency = EXCLUDED.currency,
+            purchase_date = EXCLUDED.purchase_date,
+            last_updated = NOW()
+            """, (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date if purchase_date != "N/A" else None))
+
 
         conn.commit()
         cur.close()
@@ -276,12 +281,17 @@ def get_orders():
     total_shipping = 0
     total_refunds = 0
 
-    orders_list = orders_data.get("payload", {}).get("Orders", [])
+    orders_list = orders_data.get("Orders", [])
+    if not isinstance(orders_list, list):
+        orders_list = []
+
     
     for order in orders_list:
         order_id = order.get("AmazonOrderId", "N/A")
         total_sales += float(order.get("OrderTotal", {}).get("Amount", 0))
-        total_units += 1  # Assuming 1 unit per order (adjust based on items in order)
+        for item in items_data.get("OrderItems", []):
+            total_units += int(item.get("QuantityOrdered", 1))  # Use actual quantity ordered
+
 
         # Get detailed order items
         order_items_url = f"{SP_API_BASE_URL}/orders/v0/orders/{order_id}/orderItems"
@@ -364,12 +374,13 @@ def download_orders():
                 orders_data = response.json()
             else:
                 return jsonify({"error": "Failed to refresh access token"}), 401
+        
+        orders_list = orders_data.get("payload", {}).get("Orders", [])
 
-        if "payload" in orders_data and "Orders" in orders_data["payload"]:
-            orders_list = orders_data["payload"]["Orders"]
-        else:
-            print("❌ ERROR: Unexpected API response format")
-            return jsonify({"error": "Failed to fetch orders", "details": orders_data}), 400
+        # ✅ Check if orders_list is empty
+        if not orders_list:
+            return jsonify({"error": "No orders found"}), 404
+
 
         # Define CSV file path
         csv_filename = "orders.csv"
