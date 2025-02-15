@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 import csv
 from flask import send_file
 import redis
+import json  # ✅ Add this import
+
 
 
 # Load environment variables
