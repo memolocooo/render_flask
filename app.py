@@ -152,6 +152,18 @@ def save_orders_to_db(order_data, selling_partner_id):
             currency = order.get("OrderTotal", {}).get("CurrencyCode", "N/A")
             purchase_date = order.get("PurchaseDate", "N/A")
 
+        if not order_data or not isinstance(order_data, list):
+            print("❌ No valid orders to save")
+            return
+
+        for order in order_data:
+            order_id = order.get("AmazonOrderId", "N/A")
+            order_status = order.get("OrderStatus", "N/A")
+            total_amount = float(order.get("OrderTotal", {}).get("Amount", 0))
+            currency = order.get("OrderTotal", {}).get("CurrencyCode", "N/A")
+            purchase_date = order.get("PurchaseDate", None)  # Fix handling for DB NULL
+
+
         cur.execute("""
         INSERT INTO amazon_orders (order_id, selling_partner_id, order_status, total_amount, currency, purchase_date, last_updated)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
@@ -281,16 +293,26 @@ def get_orders():
     total_shipping = 0
     total_refunds = 0
 
-    orders_list = orders_data.get("Orders", [])
-    if not isinstance(orders_list, list):
-        orders_list = []
+
+    orders_list = orders_data.get("payload", {}).get("Orders", [])
+    if not orders_list:
+        return jsonify({"error": "No orders found"}), 404
+
+
 
     
     for order in orders_list:
         order_id = order.get("AmazonOrderId", "N/A")
         total_sales += float(order.get("OrderTotal", {}).get("Amount", 0))
+
+        # Get detailed order items (Move API request above)
+        order_items_url = f"{SP_API_BASE_URL}/orders/v0/orders/{order_id}/orderItems"
+        items_response = requests.get(order_items_url, headers=headers)
+        items_data = items_response.json()
+
         for item in items_data.get("OrderItems", []):
-            total_units += int(item.get("QuantityOrdered", 1))  # Use actual quantity ordered
+            total_units += int(item.get("QuantityOrdered", 1))
+
 
 
         # Get detailed order items
@@ -374,6 +396,13 @@ def download_orders():
                 orders_data = response.json()
             else:
                 return jsonify({"error": "Failed to refresh access token"}), 401
+
+        orders_list = orders_data.get("payload", {}).get("Orders", [])
+
+        # ✅ Check if orders_list is empty
+        if not orders_list:
+            return jsonify({"error": "No orders found"}), 404
+
         
         orders_list = orders_data.get("payload", {}).get("Orders", [])
 
